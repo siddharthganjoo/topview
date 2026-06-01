@@ -8,8 +8,32 @@ Streamlit secrets required (app Settings → Secrets):
     AAD_TENANT_ID = "your-directory-id"       # from IT / Azure AD
 """
 
-import os, sys, struct, threading
+import os, sys, struct, threading, platform
 from datetime import date, timedelta, datetime
+
+
+def _ensure_odbc_driver():
+    """Install Microsoft ODBC Driver 18 on Linux (Streamlit Cloud) if not present."""
+    if platform.system() != "Linux":
+        return
+    try:
+        import pyodbc
+        if any("SQL Server" in d for d in pyodbc.drivers()):
+            return
+    except Exception:
+        pass
+    cmds = [
+        "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add -",
+        "curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list "
+        "-o /etc/apt/sources.list.d/mssql-release.list",
+        "apt-get update -qq",
+        "ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18",
+    ]
+    for cmd in cmds:
+        os.system(cmd)
+
+
+_ensure_odbc_driver()
 
 import streamlit as st
 import plotly.graph_objects as go

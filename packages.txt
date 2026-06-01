@@ -1,0 +1,3 @@
+curl
+gnupg
+unixodbc-dev
