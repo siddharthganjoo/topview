@@ -8,32 +8,8 @@ Streamlit secrets required (app Settings → Secrets):
     AAD_TENANT_ID = "your-directory-id"       # from IT / Azure AD
 """
 
-import os, sys, struct, threading, platform
+import os, sys, struct, threading, platform, subprocess
 from datetime import date, timedelta, datetime
-
-
-def _ensure_odbc_driver():
-    """Install Microsoft ODBC Driver 18 on Linux (Streamlit Cloud) if not present."""
-    if platform.system() != "Linux":
-        return
-    try:
-        import pyodbc
-        if any("SQL Server" in d for d in pyodbc.drivers()):
-            return
-    except Exception:
-        pass
-    cmds = [
-        "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add -",
-        "curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list "
-        "-o /etc/apt/sources.list.d/mssql-release.list",
-        "apt-get update -qq",
-        "ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18",
-    ]
-    for cmd in cmds:
-        os.system(cmd)
-
-
-_ensure_odbc_driver()
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -149,6 +125,56 @@ def _interp_color(t: float) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ── ODBC driver bootstrap (Linux / Streamlit Cloud) ──────────────────────────
+@st.cache_resource(show_spinner=False)
+def _ensure_odbc() -> str:
+    """
+    Install Microsoft ODBC Driver 18 on Linux if not already present.
+    Runs once per deployment; result is cached.
+    Returns the driver name string to use in connection strings.
+    """
+    if platform.system() != "Linux":
+        return "ODBC Driver 18 for SQL Server"
+
+    import pyodbc
+    drivers = pyodbc.drivers()
+    for candidate in ("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"):
+        if candidate in drivers:
+            return candidate
+
+    # Driver not found — install it
+    script = r"""
+set -e
+# Add Microsoft apt repository
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+    | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+
+# Detect Ubuntu version
+UBUNTU_VER=$(lsb_release -rs 2>/dev/null || echo "22.04")
+curl -fsSL "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VER}/prod.list" \
+    -o /etc/apt/sources.list.d/mssql-release.list
+
+apt-get update -qq 2>&1 | tail -3
+ACCEPT_EULA=Y DEBIAN_FRONTEND=noninteractive apt-get install -y msodbcsql18 2>&1 | tail -5
+"""
+    result = subprocess.run(["bash", "-c", script],
+                            capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ODBC driver install failed:\n{result.stderr[-800:]}"
+        )
+    return "ODBC Driver 18 for SQL Server"
+
+
+with st.spinner("Checking database driver…"):
+    try:
+        _DRIVER = _ensure_odbc()
+    except RuntimeError as _odbc_err:
+        st.error(f"**Cannot connect: ODBC driver unavailable.**\n\n```\n{_odbc_err}\n```")
+        st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Auth — Microsoft device-code flow
 # ══════════════════════════════════════════════════════════════════════════════
 if not AAD_CLIENT_ID or not AAD_TENANT_ID:
@@ -238,7 +264,7 @@ token = st.session_state.token
 # ══════════════════════════════════════════════════════════════════════════════
 def _conn(server: str, database: str):
     import pyodbc
-    cs = (f"DRIVER={{{DRIVER}}};SERVER=tcp:{server},1433;DATABASE={database};"
+    cs = (f"DRIVER={{{_DRIVER}}};SERVER=tcp:{server},1433;DATABASE={database};"
           "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=120;MARS_Connection=yes;")
     conn = pyodbc.connect(cs, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: _token_bytes(token)})
     conn.timeout = 1800
