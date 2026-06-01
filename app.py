@@ -441,8 +441,8 @@ with st.sidebar:
         selected_name = st.selectbox("Account", account_names, index=default_idx)
         name_to_id    = dict(zip(accounts_df["Name"], accounts_df["Id"]))
         account_id    = int(name_to_id[selected_name])
-    except Exception as _e:
-        st.error(f"Account list failed: {_e}")
+    except Exception:
+        # Master DB unreachable (firewall) — fall back to manual ID entry
         account_id    = int(st.number_input("Account ID", min_value=1,
                                              value=st.session_state.account_id or 68, step=1))
         selected_name = str(account_id)
