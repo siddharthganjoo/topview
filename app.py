@@ -1,59 +1,58 @@
 """
-app.py — Single-day Top View heatmap for Streamlit Community Cloud.
-Auth: Microsoft device code flow — users log in with their company account.
+app.py — Top View heatmap (Streamlit Community Cloud).
 
-Streamlit secrets required (Settings → Secrets):
-    AAD_CLIENT_ID = "your-app-registration-client-id"
-    AAD_TENANT_ID = "your-azure-tenant-id"
+Auth: Microsoft device-code flow — users sign in with their company account.
 
-Usage (local):
-    streamlit run streamlit_cloud/app.py
+Streamlit secrets required (app Settings → Secrets):
+    AAD_CLIENT_ID = "your-application-id"     # from IT / Azure AD app registration
+    AAD_TENANT_ID = "your-directory-id"       # from IT / Azure AD
 """
 
 import os, sys, struct, threading
-from datetime import date
+from datetime import date, timedelta, datetime
 
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-import polars as pl
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pipeline import greedy_match, PROPS, PROP_LABELS, N_BINS_DEFAULT
+from pipeline import greedy_match, PROPS, PROP_LABELS
 
-# ── Synapse / Azure config ────────────────────────────────────────────────────
-SERVER   = "saw-spf-prod-weu-ondemand.sql.azuresynapse.net"
-DATABASE = "PowerBiViewsDB"
-DRIVER   = "ODBC Driver 18 for SQL Server"
+# ── Config ────────────────────────────────────────────────────────────────────
+SYNAPSE_SERVER = "saw-spf-prod-weu-ondemand.sql.azuresynapse.net"
+SYNAPSE_DB     = "PowerBiViewsDB"
+MASTER_SERVER  = "eur1-ip1-integration-sql1.database.windows.net"
+MASTER_DB      = "eur1-ip1-integration-sql1-master"
+DRIVER         = "ODBC Driver 18 for SQL Server"
 SQL_COPT_SS_ACCESS_TOKEN = 1256
 
 TABLE_COUNT  = 1
 TABLE_SELECT = 5
 BATCH_SIZE   = 100_000
+N_BINS       = 72
 
 AAD_CLIENT_ID = st.secrets.get("AAD_CLIENT_ID", os.environ.get("AAD_CLIENT_ID", ""))
 AAD_TENANT_ID = st.secrets.get("AAD_TENANT_ID", os.environ.get("AAD_TENANT_ID", ""))
 AAD_SCOPES    = ["https://database.windows.net/user_impersonation"]
 
-# ── Colors ────────────────────────────────────────────────────────────────────
-GREEN_DARK = "#2E7D32"
-BG_PAGE    = "#F0F0F0"
-BG_CARD    = "#FFFFFF"
-TEXT_DARK  = "#212121"
-TEXT_MUTED = "#757575"
-LOGO_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meggsius_connect_logo.png")
+# ── Visual constants ──────────────────────────────────────────────────────────
+GREEN_DARK  = "#00662f"
+BG_PAGE     = "#F5F5F5"
+BG_CARD     = "#FFFFFF"
+TEXT_DARK   = "#212121"
+TEXT_MUTED  = "#757575"
+LOGO_PATH   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meggsius_connect_logo.png")
 
-HEATMAP_SCALE = [
-    [0.00, "#0D47A1"],
-    [0.30, "#42A5F5"],
-    [0.55, "#E3F2FD"],
-    [0.75, "#EF5350"],
-    [1.00, "#B71C1C"],
-]
+HEATMAP_SCALE = [[0.0, "#aabef4"], [0.5, "#c494c2"], [1.0, "#bb6553"]]
+EMPTY_BIN_COLOR = "#4f57a6"
 
-# ── Page config ───────────────────────────────────────────────────────────────
+PROPS_EXT = PROPS + ["Volume"]
+PROP_LABELS_EXT = {**PROP_LABELS, "Volume": "Volume (ml)"}
+
+# ── Page setup ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Top View — Live",
+    page_title="Top View",
     page_icon="🥚",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -61,44 +60,83 @@ st.set_page_config(
 
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
 html, body, [class*="css"] {{
-    font-family: 'Roboto', sans-serif;
-    font-size: 14px;
+    font-family: 'Trebuchet MS', sans-serif;
     background-color: {BG_PAGE};
     color: {TEXT_DARK};
+    font-size: 14px;
 }}
 [data-testid="stSidebar"] {{
     background-color: {GREEN_DARK} !important;
     min-width: 240px !important;
     max-width: 240px !important;
 }}
-[data-testid="stSidebar"] * {{ color: white !important; }}
-[data-testid="stSidebar"] input {{
-    color: {TEXT_DARK} !important;
-    background-color: white !important;
+[data-testid="stSidebar"] [data-testid="stImage"] {{
+    background-color: white;
+    border-radius: 8px;
+    padding: 8px;
 }}
+[data-testid="stSidebar"] * {{ color: white !important; }}
+[data-testid="stSidebar"] input,
 [data-testid="stSidebar"] .stNumberInput input,
 [data-testid="stSidebar"] .stDateInput input {{
     color: {TEXT_DARK} !important;
     background-color: white !important;
 }}
-.card {{ background:{BG_CARD}; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.12); margin-bottom:16px; overflow:hidden; }}
-.card-header {{ background:{GREEN_DARK}; color:white; padding:0 16px; height:40px; display:flex; align-items:center; font-weight:600; font-size:14px; }}
-.card-body {{ padding:16px; }}
-.metric-tile {{ background:{BG_CARD}; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.10); padding:14px 16px; text-align:center; }}
-.metric-value {{ font-size:26px; font-weight:700; color:{GREEN_DARK}; line-height:1.2; }}
-.metric-label {{ font-size:11px; color:{TEXT_MUTED}; margin-top:4px; font-weight:500; text-transform:uppercase; letter-spacing:0.5px; }}
-.house-label {{ font-size:12px; font-weight:600; color:{TEXT_MUTED}; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:2px; margin-top:12px; }}
-.house-total {{ font-size:13px; font-weight:500; color:{TEXT_DARK}; margin-bottom:3px; }}
-.breadcrumb {{ font-size:14px; font-weight:500; color:{TEXT_DARK}; padding:10px 0 6px 0; }}
-.breadcrumb .sep {{ color:{TEXT_MUTED}; margin:0 6px; }}
-#MainMenu {{ visibility:hidden; }} footer {{ visibility:hidden; }} header {{ visibility:hidden; }}
+[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] {{
+    background-color: white !important;
+}}
+[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] * {{
+    color: {TEXT_DARK} !important;
+}}
+section.main > div {{ padding-top: 8px !important; }}
+.metric-tile {{
+    background: {BG_CARD};
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.10);
+    padding: 10px 14px;
+    text-align: center;
+}}
+.metric-value {{ font-size: 22px; font-weight: 700; color: {GREEN_DARK}; line-height: 1.2; }}
+.metric-label {{ font-size: 10px; color: {TEXT_MUTED}; text-transform: uppercase;
+                 letter-spacing: 0.5px; margin-top: 3px; }}
+#MainMenu {{ visibility: hidden; }}
+footer    {{ visibility: hidden; }}
+header    {{ visibility: hidden; }}
+[data-testid="collapsedControl"] {{ display: none !important; }}
+[data-testid="stSidebarCollapseButton"] {{ display: none !important; }}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── Auth helpers ──────────────────────────────────────────────────────────────
+# ── Color interpolation ───────────────────────────────────────────────────────
+def _interp_color(t: float) -> str:
+    s = HEATMAP_SCALE
+    if t <= 0: return s[0][1]
+    if t >= 1: return s[-1][1]
+    for i in range(len(s) - 1):
+        lo_t, lo_c = s[i]; hi_t, hi_c = s[i + 1]
+        if lo_t <= t <= hi_t:
+            f = (t - lo_t) / (hi_t - lo_t)
+            def _h(c): h = c.lstrip('#'); return int(h[:2],16), int(h[2:4],16), int(h[4:],16)
+            r1,g1,b1 = _h(lo_c); r2,g2,b2 = _h(hi_c)
+            return f"rgb({int(r1+f*(r2-r1))},{int(g1+f*(g2-g1))},{int(b1+f*(b2-b1))})"
+    return s[-1][1]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Auth — Microsoft device-code flow
+# ══════════════════════════════════════════════════════════════════════════════
+if not AAD_CLIENT_ID or not AAD_TENANT_ID:
+    st.error(
+        "**App not configured.**\n\n"
+        "Go to **Settings → Secrets** and add:\n"
+        "```\nAAD_CLIENT_ID = \"your-application-id\"\n"
+        "AAD_TENANT_ID = \"your-directory-id\"\n```"
+    )
+    st.stop()
+
+
 def _msal_app():
     import msal
     return msal.PublicClientApplication(
@@ -107,25 +145,16 @@ def _msal_app():
     )
 
 
-def _token_to_bytes(token_str: str) -> bytes:
+def _token_bytes(token_str: str) -> bytes:
     b = token_str.encode("utf-16-le")
     return struct.pack("<I", len(b)) + b
 
 
-# ── Auth gate ─────────────────────────────────────────────────────────────────
-if not AAD_CLIENT_ID or not AAD_TENANT_ID:
-    st.error(
-        "**App not configured.**\n\n"
-        "Add `AAD_CLIENT_ID` and `AAD_TENANT_ID` to Streamlit secrets."
-    )
-    st.stop()
+for k, v in [("token", None), ("device_flow", None)]:
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-if "token" not in st.session_state:
-    st.session_state.token       = None
-if "device_flow" not in st.session_state:
-    st.session_state.device_flow = None
-
-# Try silent token refresh first (uses MSAL in-memory cache)
+# Silent token refresh
 if st.session_state.token is None:
     try:
         app_msal = _msal_app()
@@ -138,7 +167,6 @@ if st.session_state.token is None:
         pass
 
 if st.session_state.token is None:
-    # ── Login screen ──────────────────────────────────────────────────────────
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         if os.path.exists(LOGO_PATH):
@@ -147,7 +175,6 @@ if st.session_state.token is None:
         st.markdown("Use your **company Microsoft account** to access the dashboard.")
 
         app_msal = _msal_app()
-
         if st.session_state.device_flow is None:
             flow = app_msal.initiate_device_flow(scopes=AAD_SCOPES)
             if "user_code" not in flow:
@@ -157,192 +184,195 @@ if st.session_state.token is None:
 
         flow = st.session_state.device_flow
         st.info(
-            f"**Step 1** — Open this link in your browser:\n\n"
-            f"### [{flow['verification_uri']}]({flow['verification_uri']})\n\n"
-            f"**Step 2** — Enter code:  `{flow['user_code']}`\n\n"
+            f"**Step 1** — Open: [{flow['verification_uri']}]({flow['verification_uri']})\n\n"
+            f"**Step 2** — Enter code: `{flow['user_code']}`\n\n"
             f"**Step 3** — Sign in with your company account\n\n"
             f"**Step 4** — Click **Done** below"
         )
-
         if st.button("✓  Done — I've signed in", type="primary", use_container_width=True):
             result_holder: dict = {}
-
             def _acquire():
                 result_holder["r"] = app_msal.acquire_token_by_device_flow(flow)
-
             t = threading.Thread(target=_acquire)
-            t.start()
-            t.join(timeout=15)
-
+            t.start(); t.join(timeout=15)
             if "r" not in result_holder:
-                st.warning("Still waiting — please complete sign-in in your browser first, then click Done again.")
+                st.warning("Still waiting — complete sign-in first, then click Done again.")
             elif "access_token" in result_holder["r"]:
                 st.session_state.token       = result_holder["r"]["access_token"]
                 st.session_state.device_flow = None
                 st.rerun()
             else:
-                err = result_holder["r"].get("error_description", "Unknown error")
-                st.error(f"Login failed: {err}")
+                st.error(f"Login failed: {result_holder['r'].get('error_description','Unknown')}")
                 st.session_state.device_flow = None
-
         st.stop()
 
 token = st.session_state.token
 
 
-# ── Synapse helpers ───────────────────────────────────────────────────────────
-def _get_connection(token_str: str):
+# ══════════════════════════════════════════════════════════════════════════════
+# DB helpers
+# ══════════════════════════════════════════════════════════════════════════════
+def _conn(server: str, database: str):
     import pyodbc
-    token_bytes = _token_to_bytes(token_str)
-    conn_str = (
-        f"DRIVER={{{DRIVER}}};"
-        f"SERVER=tcp:{SERVER},1433;"
-        f"DATABASE={DATABASE};"
-        "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=120;"
-        "MARS_Connection=yes;"
-    )
-    conn = pyodbc.connect(conn_str, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_bytes})
+    cs = (f"DRIVER={{{DRIVER}}};SERVER=tcp:{server},1433;DATABASE={database};"
+          "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=120;MARS_Connection=yes;")
+    conn = pyodbc.connect(cs, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: _token_bytes(token)})
     conn.timeout = 1800
     return conn
 
 
-def _sql_count_day(account_id: int, day: date) -> str:
-    d  = day.strftime("%Y-%m-%d")
-    dn = (day.replace(day=day.day + 1) if day.day < 28
-          else date(day.year + (day.month // 12), (day.month % 12) + 1, 1)
-         ).strftime("%Y-%m-%d")
-    return f"""
-SELECT r.AccountId, r.HouseIdSet, r.BestUtcDateTime, r.OffsetMinutes,
-       r.linenmbr, r.distancedonepercent, r.eggsincrease
-FROM OPENROWSET(
-    BULK '/{TABLE_COUNT}/PartitionKey={day.year}-{day.month:02d}-*/*.parquet',
-    DATA_SOURCE = 'ArchiveDataLake', FORMAT = 'PARQUET'
-) AS r
-WHERE r.BestLocalDateTime >= '{d}'
-  AND r.BestLocalDateTime <  '{dn}'
-  AND r.AccountId = {account_id}
-  AND TRY_CAST(r.eggsincrease AS float) > 0
-  AND r.linenmbr IS NOT NULL
-"""
+def _fetch(conn, sql: str) -> pd.DataFrame:
+    cur = conn.cursor()
+    cur.execute(sql)
+    if cur.description is None:
+        cur.close()
+        return pd.DataFrame()
+    cols = [c[0] for c in cur.description]
+    rows: list = []
+    while True:
+        batch = cur.fetchmany(BATCH_SIZE)
+        if not batch:
+            break
+        rows.extend(batch)
+    cur.close()
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame([tuple(r) for r in rows], columns=cols)
 
 
-def _sql_select_day(account_id: int, day: date) -> str:
-    d  = day.strftime("%Y-%m-%d")
-    dn = (day.replace(day=day.day + 1) if day.day < 28
-          else date(day.year + (day.month // 12), (day.month % 12) + 1, 1)
-         ).strftime("%Y-%m-%d")
-    return f"""
-SELECT r.AccountId, r.HouseIdSet, r.BestUtcDateTime, r.OffsetMinutes,
-       r.selectv2_lane, r.selectv2_volume,
-       r.selectv2_isrejectedonmanure, r.selectv2_isrejectedonblood,
-       r.selectv2_isrejectedoncrack,
-       r.selectv2_isrejectedongroupdirt, r.selectv2_isrejectedongroupdamage
-FROM OPENROWSET(
-    BULK '/{TABLE_SELECT}/PartitionKey={day.year}-{day.month:02d}-*/*.parquet',
-    DATA_SOURCE = 'ArchiveDataLake', FORMAT = 'PARQUET'
-) AS r
-WHERE r.BestLocalDateTime >= '{d}'
-  AND r.BestLocalDateTime <  '{dn}'
-  AND r.AccountId = {account_id}
-  AND r.selectv2_lane IS NOT NULL
-"""
+def _nday(d: date) -> date:
+    return d.replace(day=d.day + 1) if d.day < 28 else date(d.year + (d.month // 12), (d.month % 12) + 1, 1)
 
 
-def _fetch(conn, sql: str) -> pl.DataFrame | None:
-    batches = pl.read_database(query=sql, connection=conn,
-                               iter_batches=True, batch_size=BATCH_SIZE)
-    parts = [b for b in batches if not b.is_empty()]
-    return pl.concat(parts) if parts else None
-
-
-def _transform_count(raw: pl.DataFrame) -> pl.DataFrame:
-    raw = raw.with_columns([
-        pl.col("eggsincrease").cast(pl.Float64, strict=False),
-        pl.col("linenmbr").cast(pl.Float64, strict=False),
-        pl.col("distancedonepercent").cast(pl.Float64, strict=False),
-        pl.col("OffsetMinutes").cast(pl.Float64, strict=False),
-    ]).filter(
-        pl.col("eggsincrease").is_not_null() &
-        pl.col("linenmbr").is_not_null() &
-        (pl.col("eggsincrease") > 0)
-    )
-    if raw.is_empty():
-        return pl.DataFrame()
-    offset = float(raw["OffsetMinutes"].drop_nulls()[0])
-    raw = raw.with_columns(
-        pl.col("BestUtcDateTime")
-          .str.replace("Z", "", literal=True).str.replace("T", " ", literal=True)
-          .str.slice(0, 19)
-          .str.strptime(pl.Datetime("us"), format="%Y-%m-%d %H:%M:%S", strict=False)
-          .dt.offset_by(f"{int(offset)}m").alias("_local_ts")
-    )
-    return raw.select([
-        pl.col("_local_ts").dt.date().alias("Date"),
-        (pl.col("_local_ts").dt.hour().cast(pl.Int64) * 3600 +
-         pl.col("_local_ts").dt.minute().cast(pl.Int64) * 60 +
-         pl.col("_local_ts").dt.second().cast(pl.Int64)).cast(pl.Float64).alias("Time"),
-        pl.col("HouseIdSet").cast(pl.Utf8).str.strip_chars().alias("House"),
-        pl.col("linenmbr").cast(pl.Int64).alias("Line"),
-        pl.col("distancedonepercent").alias("Position"),
-        pl.col("eggsincrease").cast(pl.Int64).alias("Eggs"),
-    ]).drop_nulls()
-
-
-def _transform_select(raw: pl.DataFrame) -> pl.DataFrame:
-    flag_map = {
-        "selectv2_isrejectedonmanure":      "p_Manure",
-        "selectv2_isrejectedonblood":       "p_Blood",
-        "selectv2_isrejectedoncrack":       "p_Crack",
-        "selectv2_isrejectedongroupdirt":   "p_Dirt",
-        "selectv2_isrejectedongroupdamage": "p_Damaged",
-    }
-    raw = raw.with_columns([
-        pl.col("selectv2_lane").cast(pl.Float64, strict=False),
-        pl.col("selectv2_volume").cast(pl.Float64, strict=False),
-        pl.col("OffsetMinutes").cast(pl.Float64, strict=False),
-    ]).filter(pl.col("selectv2_lane").is_not_null())
-    if raw.is_empty():
-        return pl.DataFrame()
-    offset = float(raw["OffsetMinutes"].drop_nulls()[0])
-    raw = raw.with_columns(
-        pl.col("BestUtcDateTime")
-          .str.replace("Z", "", literal=True).str.replace("T", " ", literal=True)
-          .str.slice(0, 19)
-          .str.strptime(pl.Datetime("us"), format="%Y-%m-%d %H:%M:%S", strict=False)
-          .dt.offset_by(f"{int(offset)}m").alias("_local_ts")
-    )
-    flag_exprs = [
-        (pl.col(src).cast(pl.Float64, strict=False) == 1.0).fill_null(False).alias(dst)
-        if src in raw.columns else pl.lit(False).alias(dst)
-        for src, dst in flag_map.items()
-    ]
-    raw = raw.with_columns(flag_exprs)
-    return raw.select([
-        pl.col("_local_ts").dt.date().alias("Date"),
-        (pl.col("_local_ts").dt.hour().cast(pl.Int64) * 3600 +
-         pl.col("_local_ts").dt.minute().cast(pl.Int64) * 60 +
-         pl.col("_local_ts").dt.second().cast(pl.Int64)).cast(pl.Float64).alias("Time"),
-        pl.col("HouseIdSet").cast(pl.Utf8).str.strip_chars().alias("House"),
-        pl.col("selectv2_lane").cast(pl.Int64).alias("Lane"),
-        pl.col("selectv2_volume").alias("Volume"),
-        pl.col("p_Manure"), pl.col("p_Blood"), pl.col("p_Crack"),
-        pl.col("p_Dirt"),   pl.col("p_Damaged"),
-    ]).drop_nulls(subset=["Time", "Lane"])
+# ── Master DB queries ─────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_accounts(_token_key: str) -> pd.DataFrame:
+    return _fetch(_conn(MASTER_SERVER, MASTER_DB), "SELECT Id, Name FROM mst.Account ORDER BY Name")
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_day(account_id: int, day_str: str, _token: str):
-    """Fetch one day from Synapse. Creates and closes its own connection."""
+def fetch_house_names(account_id: int, _token_key: str) -> dict:
+    df = _fetch(_conn(MASTER_SERVER, MASTER_DB), f"""
+        SELECT h.Id, h.Name AS HouseName, s.Name AS SiteName
+        FROM mst.House h JOIN mst.Site s ON h.SiteId = s.Id
+        WHERE s.AccountId = {account_id}
+    """)
+    mapping: dict = {}
+    for _, row in df.iterrows():
+        label = f"{row['HouseName']}  ({row['SiteName']})"
+        mapping[str(row["Id"])]   = label
+        mapping[f"[{row['Id']}]"] = label
+    return mapping
+
+
+# ── Synapse queries ───────────────────────────────────────────────────────────
+def _sql_count(account_id: int, day: date) -> str:
+    d, dn = day.strftime("%Y-%m-%d"), _nday(day).strftime("%Y-%m-%d")
+    return f"""
+SELECT r.HouseIdSet, r.BestUtcDateTime, r.OffsetMinutes,
+       r.linenmbr, r.distancedonepercent, r.eggsincrease
+FROM OPENROWSET(BULK '/{TABLE_COUNT}/PartitionKey={day.year}-{day.month:02d}-*/*.parquet',
+    DATA_SOURCE='ArchiveDataLake', FORMAT='PARQUET') AS r
+WHERE r.BestLocalDateTime>='{d}' AND r.BestLocalDateTime<'{dn}'
+  AND r.AccountId={account_id}
+  AND TRY_CAST(r.eggsincrease AS float)>0 AND r.linenmbr IS NOT NULL"""
+
+
+def _sql_select(account_id: int, day: date) -> str:
+    d, dn = day.strftime("%Y-%m-%d"), _nday(day).strftime("%Y-%m-%d")
+    return f"""
+SELECT r.HouseIdSet, r.BestUtcDateTime, r.OffsetMinutes, r.selectv2_lane,
+       r.selectv2_volume,
+       r.selectv2_isrejectedonmanure, r.selectv2_isrejectedonblood,
+       r.selectv2_isrejectedoncrack, r.selectv2_isrejectedongroupdirt,
+       r.selectv2_isrejectedongroupdamage
+FROM OPENROWSET(BULK '/{TABLE_SELECT}/PartitionKey={day.year}-{day.month:02d}-*/*.parquet',
+    DATA_SOURCE='ArchiveDataLake', FORMAT='PARQUET') AS r
+WHERE r.BestLocalDateTime>='{d}' AND r.BestLocalDateTime<'{dn}'
+  AND r.AccountId={account_id} AND r.selectv2_lane IS NOT NULL"""
+
+
+# ── Transform ─────────────────────────────────────────────────────────────────
+def _xform_count(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    raw = raw.copy()
+    for col in ["eggsincrease","distancedonepercent","OffsetMinutes"]:
+        raw[col] = pd.to_numeric(raw[col], errors="coerce")
+    raw = raw[raw["eggsincrease"].notna() & (raw["eggsincrease"] > 0)]
+    if raw.empty:
+        return pd.DataFrame()
+    off = float(raw["OffsetMinutes"].dropna().iloc[0])
+
+    def _ts(v):
+        try:
+            return datetime.strptime(str(v).replace("Z","").replace("T"," ")[:19],
+                                     "%Y-%m-%d %H:%M:%S") + timedelta(minutes=off)
+        except Exception:
+            return None
+
+    raw["_dt"]      = raw["BestUtcDateTime"].apply(_ts)
+    raw             = raw.dropna(subset=["_dt"])
+    raw["Time"]     = (raw["_dt"].dt.hour*3600 + raw["_dt"].dt.minute*60 + raw["_dt"].dt.second).astype(float)
+    raw["House"]    = raw["HouseIdSet"].astype(str).str.strip()
+    raw["Line"]     = pd.to_numeric(raw["linenmbr"], errors="coerce").astype("Int64")
+    raw["Position"] = raw["distancedonepercent"]
+    raw["Eggs"]     = raw["eggsincrease"].astype(int)
+    return raw[["Time","House","Line","Position","Eggs"]].dropna(subset=["Time","House","Position","Eggs"])
+
+
+def _xform_select(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    FLAG = {"selectv2_isrejectedonmanure":"p_Manure","selectv2_isrejectedonblood":"p_Blood",
+            "selectv2_isrejectedoncrack":"p_Crack","selectv2_isrejectedongroupdirt":"p_Dirt",
+            "selectv2_isrejectedongroupdamage":"p_Damaged"}
+    raw = raw.copy()
+    raw["selectv2_lane"] = pd.to_numeric(raw["selectv2_lane"], errors="coerce")
+    raw["OffsetMinutes"] = pd.to_numeric(raw["OffsetMinutes"], errors="coerce")
+    raw = raw[raw["selectv2_lane"].notna()]
+    if raw.empty:
+        return pd.DataFrame()
+    off = float(raw["OffsetMinutes"].dropna().iloc[0])
+
+    def _ts(v):
+        try:
+            return datetime.strptime(str(v).replace("Z","").replace("T"," ")[:19],
+                                     "%Y-%m-%d %H:%M:%S") + timedelta(minutes=off)
+        except Exception:
+            return None
+
+    raw["_dt"]   = raw["BestUtcDateTime"].apply(_ts)
+    raw          = raw.dropna(subset=["_dt"])
+    for src, dst in FLAG.items():
+        raw[dst] = (pd.to_numeric(raw.get(src, pd.Series(0, index=raw.index)), errors="coerce").fillna(0) == 1.0)
+    raw["Volume"] = pd.to_numeric(raw.get("selectv2_volume", pd.Series(dtype=float)), errors="coerce")
+    raw["Time"]   = (raw["_dt"].dt.hour*3600 + raw["_dt"].dt.minute*60 + raw["_dt"].dt.second).astype(float)
+    raw["House"]  = raw["HouseIdSet"].astype(str).str.strip()
+    raw["Lane"]   = raw["selectv2_lane"].astype(int)
+    cols = ["Time","House","Lane","Volume"] + list(FLAG.values())
+    return raw[cols].dropna(subset=["Time","House"])
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def fetch_day(account_id: int, day_str: str, _token_key: str):
     day  = date.fromisoformat(day_str)
-    conn = _get_connection(_token)
-    try:
-        raw_c = _fetch(conn, _sql_count_day(account_id, day))
-        raw_s = _fetch(conn, _sql_select_day(account_id, day))
-    finally:
-        conn.close()
-    dc = _transform_count(raw_c).to_pandas()  if raw_c is not None else None
-    ds = _transform_select(raw_s).to_pandas() if raw_s is not None else None
+    conn = _conn(SYNAPSE_SERVER, SYNAPSE_DB)
+    dc   = _xform_count(_fetch(conn, _sql_count(account_id, day)))
+    ds   = _xform_select(_fetch(conn, _sql_select(account_id, day)))
     return dc, ds
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Session state
+# ══════════════════════════════════════════════════════════════════════════════
+_token_key = token[:16] if token else ""   # cache-bust key when token changes
+
+for k, v in [("sel_date", date.today()), ("account_id", None), ("account_name", None),
+             ("sel_prop", PROPS[0]), ("normalize", True), ("combined", False),
+             ("scale_cap", 95), ("cc_gamma", 2.0), ("do_fetch", False)]:
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -353,200 +383,310 @@ with st.sidebar:
         st.markdown("### 🥚 Meggsius Connect")
 
     st.markdown("---")
-    account_id = int(st.number_input("Account ID", min_value=1, value=68, step=1))
+    try:
+        accounts_df   = fetch_accounts(_token_key)
+        account_names = accounts_df["Name"].tolist()
+        default_idx   = (account_names.index(st.session_state.account_name)
+                         if st.session_state.account_name in account_names else 0)
+        selected_name = st.selectbox("Account", account_names, index=default_idx)
+        name_to_id    = dict(zip(accounts_df["Name"], accounts_df["Id"]))
+        account_id    = int(name_to_id[selected_name])
+    except Exception as _e:
+        st.error(f"Account list failed: {_e}")
+        account_id    = int(st.number_input("Account ID", min_value=1,
+                                             value=st.session_state.account_id or 68, step=1))
+        selected_name = str(account_id)
 
     st.markdown("---")
-    sel_date = st.date_input("Date", value=date.today())
+    date_input = st.date_input("Date", value=st.session_state.sel_date)
+    sel_prop   = st.selectbox("Rejection type", PROPS_EXT,
+                              index=PROPS_EXT.index(st.session_state.sel_prop)
+                              if st.session_state.sel_prop in PROPS_EXT else 0,
+                              format_func=lambda p: PROP_LABELS_EXT[p])
+    scale_cap  = st.slider("Colour scale cap", 50, 100, st.session_state.scale_cap, 5)
+    cc_gamma   = st.slider("Gradient curve",   1.0, 4.0, st.session_state.cc_gamma, 0.5)
+    normalize  = st.toggle("Normalize per house", value=st.session_state.normalize)
+    combined   = st.toggle("Houses combined",     value=st.session_state.combined)
 
     st.markdown("---")
-    n_bins    = st.slider("Position bins", 5, 30, N_BINS_DEFAULT, 1)
-    normalize = st.toggle("Normalize per day", value=False)
-    combined  = st.toggle("Houses combined", value=False)
-    sel_prop  = st.selectbox("Rejection type", options=PROPS,
-                             format_func=lambda p: PROP_LABELS[p])
+    if st.button("Search", type="primary", use_container_width=True):
+        st.session_state.account_id   = account_id
+        st.session_state.account_name = selected_name
+        st.session_state.sel_date     = date_input
+        st.session_state.sel_prop     = sel_prop
+        st.session_state.normalize    = normalize
+        st.session_state.combined     = combined
+        st.session_state.scale_cap    = scale_cap
+        st.session_state.cc_gamma     = cc_gamma
+        st.session_state.do_fetch     = True
+        st.rerun()
 
     st.markdown("---")
     if st.button("Sign out", use_container_width=True):
         st.session_state.token       = None
         st.session_state.device_flow = None
+        st.session_state.do_fetch    = False
         st.rerun()
 
 
-# ── Fetch data ────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Main viewport
+# ══════════════════════════════════════════════════════════════════════════════
+account_id = st.session_state.account_id
+sel_date   = st.session_state.sel_date
+sel_prop   = st.session_state.sel_prop
+normalize  = st.session_state.normalize
+combined   = st.session_state.combined
+scale_cap  = st.session_state.scale_cap
+cc_gamma   = st.session_state.cc_gamma
+
+DAYS_LONG = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+date_str  = f"{DAYS_LONG[sel_date.weekday()]} {sel_date.strftime('%d/%m/%Y')}"
+_prop_display = {**PROP_LABELS, "Volume": "Volume (ml)"}
+account_label = st.session_state.account_name or str(account_id)
+
 st.markdown(
-    f'<div class="breadcrumb">'
-    f'Production <span class="sep" style="color:#757575;margin:0 6px;">›</span> Account {account_id} '
-    f'<span class="sep" style="color:#757575;margin:0 6px;">›</span> Top View '
-    f'<span class="sep" style="color:#757575;margin:0 6px;">›</span> <b>{sel_date}</b>'
-    f'</div>',
+    f'<div style="background:{GREEN_DARK};color:white;padding:10px 18px;font-size:17px;'
+    f'font-weight:600;border-radius:8px;margin-bottom:12px">Top View'
+    f'<span style="font-size:12px;font-weight:400;opacity:0.82;margin-left:8px">'
+    f'{date_str} &nbsp;·&nbsp; {account_label} &nbsp;·&nbsp; {_prop_display.get(sel_prop, sel_prop)}'
+    f'</span></div>',
     unsafe_allow_html=True,
 )
 
-with st.spinner(f"Querying Synapse for {sel_date}…"):
+if not st.session_state.do_fetch or account_id is None:
+    st.info("Select an account and date in the sidebar, then click **Search**.")
+    st.stop()
+
+# ── Fetch ─────────────────────────────────────────────────────────────────────
+with st.status(f"Querying Synapse for {sel_date}…", expanded=True) as fetch_status:
     try:
-        dc, ds = fetch_day(account_id, str(sel_date), token)
+        st.write("Fetching count data…")
+        st.write("Fetching select / grading data…")
+        dc, ds = fetch_day(account_id, str(sel_date), _token_key)
+        fetch_status.update(label=f"Loaded ✓", state="complete", expanded=False)
     except Exception as e:
-        err_str = str(e)
-        if "token" in err_str.lower() or "login" in err_str.lower() or "401" in err_str:
-            st.session_state.token = None
-            st.error("Session expired — please sign in again.")
-            st.rerun()
+        fetch_status.update(label="Query failed", state="error")
         st.error(f"Query failed: {e}")
         st.stop()
 
 if dc is None or dc.empty:
-    st.warning(f"No count data for {sel_date} on account {account_id}.")
+    st.warning(f"No count data for {sel_date}.")
     st.stop()
 if ds is None or ds.empty:
-    st.warning(f"No select data for {sel_date} on account {account_id}.")
+    st.warning(f"No select data for {sel_date}.")
     st.stop()
 
-
-# ── Greedy matching ───────────────────────────────────────────────────────────
-count_houses  = set(dc["House"].dropna().unique())
-select_houses = set(ds["House"].dropna().unique())
-both          = sorted(count_houses & select_houses)
-
+# ── Greedy match ──────────────────────────────────────────────────────────────
+both = sorted(set(dc["House"].dropna().unique()) & set(ds["House"].dropna().unique()))
 if not both:
-    st.error(
-        f"Count houses: {sorted(count_houses)}\n"
-        f"Select houses: {sorted(select_houses)}\n"
-        "No overlap — cannot match."
-    )
+    st.error("No house overlap between count and select.")
     st.stop()
 
 parts = []
 for h in both:
-    dc_h = dc[dc["House"] == h]
-    ds_h = ds[ds["House"] == h]
+    dc_h = dc[dc["House"] == h]; ds_h = ds[ds["House"] == h]
     if dc_h.empty or ds_h.empty:
         continue
-    matched = greedy_match(dc_h, ds_h, n_bins, 0.0)
-    parts.append(matched)
+    parts.append(greedy_match(dc_h, ds_h, N_BINS, 0.0))
 
 if not parts:
-    st.warning("Greedy matching returned no data.")
+    st.warning("No matched data.")
     st.stop()
 
 agg       = pd.concat(parts, ignore_index=True)
 agg_clean = agg.dropna(subset=["Bin"]).copy()
 agg_clean["Bin"] = agg_clean["Bin"].astype(int)
+if "Line" in agg_clean.columns and agg_clean["Line"].notna().any():
+    agg_clean["Line"] = agg_clean["Line"].astype("Int64")
+if "Lane" in agg_clean.columns:
+    agg_clean = agg_clean[agg_clean["Lane"].notna()].copy()
+    agg_clean["Lane"] = agg_clean["Lane"].astype(int)
 
+# House name mapping
+try:
+    house_name_map = fetch_house_names(account_id, _token_key)
+    agg_clean["House"] = agg_clean["House"].map(lambda h: house_name_map.get(str(h), h))
+except Exception:
+    house_name_map = {}
+
+# ── Summary metric tiles ──────────────────────────────────────────────────────
+total_eggs    = len(agg_clean)
+flag_cols     = [p for p in PROPS if p in agg_clean.columns]
+rej_any       = agg_clean[flag_cols].any(axis=1).sum() if flag_cols else 0
+rej_pct       = rej_any / total_eggs * 100 if total_eggs else 0
 total_counted = int(dc["Eggs"].sum())
-drift = abs(total_counted - len(ds)) / max(total_counted, 1) * 100
+drift         = abs(total_counted - total_eggs) / max(total_counted, 1) * 100
+avg_volume    = (agg_clean["Volume"].mean()
+                 if "Volume" in agg_clean.columns and agg_clean["Volume"].notna().any() else None)
 
+def _tile(val: str, lbl: str) -> str:
+    return (f'<div class="metric-tile"><div class="metric-value">{val}</div>'
+            f'<div class="metric-label">{lbl}</div></div>')
 
-# ── Metrics ───────────────────────────────────────────────────────────────────
-mc1, mc2, mc3, mc4 = st.columns(4)
-total_eggs = len(agg_clean)
-rej_any    = agg_clean[[p for p in PROPS if p in agg_clean.columns]].any(axis=1).sum()
-rej_pct    = rej_any / total_eggs * 100 if total_eggs else 0
-
-mc1.markdown(f'<div class="metric-tile"><div class="metric-value">{total_eggs:,}</div><div class="metric-label">Eggs graded</div></div>', unsafe_allow_html=True)
-mc2.markdown(f'<div class="metric-tile"><div class="metric-value">{rej_pct:.1f}%</div><div class="metric-label">Rejected (any)</div></div>', unsafe_allow_html=True)
-mc3.markdown(f'<div class="metric-tile"><div class="metric-value">{drift:.1f}%</div><div class="metric-label">Count / grade drift</div></div>', unsafe_allow_html=True)
-mc4.markdown(f'<div class="metric-tile"><div class="metric-value">{len(both)}</div><div class="metric-label">Houses matched</div></div>', unsafe_allow_html=True)
+c1, c2, c3, c4, c5 = st.columns(5)
+for col, val, lbl in [
+    (c1, f"{total_eggs:,}",                          "Eggs (Select)"),
+    (c2, f"{rej_pct:.1f}%",                          "Rejected (any)"),
+    (c3, f"{drift:.1f}%",                            "Count/select drift"),
+    (c4, f"{avg_volume:.1f}" if avg_volume else "—", "Avg volume (ml)"),
+    (c5, str(len(both)),                             "Houses"),
+]:
+    col.markdown(f'<div class="metric-tile"><div class="metric-value">{val}</div>'
+                 f'<div class="metric-label">{lbl}</div></div>', unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-
-# ── Heatmap ───────────────────────────────────────────────────────────────────
-bin_labels = [
-    f"{int(b * 100 / n_bins)}–{int((b + 1) * 100 / n_bins)}%"
-    for b in range(n_bins)
-]
-
-def _build_strip(sub_df):
-    row_z, row_text = [], []
-    for b in range(n_bins):
-        sub_b = sub_df[sub_df["Bin"] == b]
-        n_b   = len(sub_b)
-        if n_b == 0:
-            row_z.append(None); row_text.append("—")
-        else:
-            k    = int(sub_b[sel_prop].sum()) if sel_prop in sub_b.columns else 0
-            rate = k / n_b * 100
-            row_z.append(rate)
-            row_text.append(f"{rate:.2f}%  ({k}/{n_b})")
-    return row_z, row_text
-
-def _scale(row_z, global_max):
-    valid = [v for v in row_z if v is not None]
-    if normalize and valid:
-        z_lo, z_hi = min(valid), max(valid)
-        if z_lo == z_hi:
-            z_lo, z_hi = 0.0, z_hi or 1.0
-    else:
-        z_lo, z_hi = 0.0, global_max or 1.0
-    return z_lo, z_hi
-
-def _render_strip(row_z, row_text, z_lo, z_hi, label, n_eggs, show_scale, is_last):
-    st.markdown(
-        f'<div class="house-label">{label}</div>'
-        f'<div class="house-total">{n_eggs:,} eggs graded</div>',
-        unsafe_allow_html=True,
-    )
-    fig = go.Figure(go.Heatmap(
-        z=[row_z], x=bin_labels, y=[""],
-        text=[row_text],
-        hovertemplate="Position: %{x}<br>%{text}<extra></extra>",
-        colorscale=HEATMAP_SCALE,
-        colorbar=dict(title=dict(text="%", side="right"),
-                      ticksuffix="%", thickness=10, len=1.0),
-        zmin=z_lo, zmax=z_hi,
-        zsmooth="best",
-        showscale=show_scale,
-    ))
-    fig.update_layout(
-        plot_bgcolor="white", paper_bgcolor="white",
-        margin=dict(l=0, r=50, t=0, b=24), height=70,
-        font=dict(family="Roboto", size=11, color=TEXT_DARK),
-        xaxis=dict(
-            tickangle=0, tickfont=dict(size=10),
-            title=dict(
-                text="← nest end   belt position   grader end →" if is_last else "",
-                font=dict(size=10, color=TEXT_MUTED),
-            ),
-        ),
-        yaxis=dict(showticklabels=False, showgrid=False),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-hmap_houses = sorted(agg_clean["House"].unique()) if "House" in agg_clean.columns else ["Farm"]
-
-all_vals = []
-for h in hmap_houses:
-    sub_h = agg_clean[agg_clean["House"] == h] if "House" in agg_clean.columns else agg_clean
-    z, _  = _build_strip(sub_h)
-    all_vals.extend(v for v in z if v is not None)
-global_max = max(all_vals) if all_vals else 1.0
-
-mode_label = "All houses combined" if combined else "Individual houses"
-st.markdown(
-    f'<div class="card">'
-    f'<div class="card-header">Top View — {PROP_LABELS[sel_prop]}'
-    f'<span style="font-size:11px;font-weight:400;opacity:0.85;margin-left:12px;">'
-    f'blue = low &nbsp;·&nbsp; red = high &nbsp;·&nbsp; {mode_label} &nbsp;·&nbsp; '
-    f'{"normalized" if normalize else "absolute scale"}'
-    f'</span></div><div class="card-body">',
-    unsafe_allow_html=True,
-)
+# ── Heatmap ────────────────────────────────────────────────────────────────────
+bin_labels = [f"{int(b*100/N_BINS)}–{int((b+1)*100/N_BINS)}%" for b in range(N_BINS)]
 
 if combined:
-    row_z, row_text = _build_strip(agg_clean)
-    z_lo, z_hi = _scale(row_z, global_max)
-    _render_strip(row_z, row_text, z_lo, z_hi,
-                  label=f"All houses ({', '.join(hmap_houses)})",
-                  n_eggs=len(agg_clean), show_scale=True, is_last=True)
+    display_groups = [("All houses", agg_clean)]
 else:
-    for i, h in enumerate(hmap_houses):
-        sub_h = agg_clean[agg_clean["House"] == h] if "House" in agg_clean.columns else agg_clean
-        row_z, row_text = _build_strip(sub_h)
-        z_lo, z_hi = _scale(row_z, global_max)
-        _render_strip(row_z, row_text, z_lo, z_hi,
-                      label=h, n_eggs=len(sub_h),
-                      show_scale=(i == 0),
-                      is_last=(i == len(hmap_houses) - 1))
+    house_list     = sorted(agg_clean["House"].unique())
+    display_groups = [(h, agg_clean[agg_clean["House"] == h]) for h in house_list]
 
-st.markdown('</div></div>', unsafe_allow_html=True)
+rates: dict = {}
+has_vol = "Volume" in agg_clean.columns
+for label_h, hd in display_groups:
+    for b in range(N_BINS):
+        bd  = hd[hd["Bin"] == b]
+        n   = len(bd)
+        k   = int(bd[sel_prop].sum()) if n > 0 and sel_prop in bd.columns else 0
+        vol = bd["Volume"].mean() if has_vol and n > 0 else None
+        rates[(label_h, b)] = (k/n*100 if n > 0 else None, n, k, vol)
+
+if sel_prop == "Volume":
+    mv = [v[3] for v in rates.values() if v[3] is not None]
+    if mv:
+        s = pd.Series(mv)
+        low_pct    = (100 - scale_cap) / 100
+        global_min = float(s.quantile(low_pct))
+        global_max = max(float(s.quantile(scale_cap/100)), global_min + 1e-9)
+    else:
+        global_min, global_max = 0.0, 1.0
+else:
+    mv = [v[0] for v in rates.values() if v[0] is not None]
+    global_min = 0.0
+    global_max = max(float(pd.Series(mv).quantile(scale_cap/100)), 1e-9) if mv else 1.0
+
+N      = len(display_groups)
+LANE_H = 74; BAR_H = 22; CELL_H = 38; PAD = 6
+shapes = []; s_x, s_y, s_t = [], [], []
+
+for idx, (label_h, _) in enumerate(display_groups):
+    inv     = N - 1 - idx
+    y_base  = inv * LANE_H + PAD
+    y_bar_b = y_base + CELL_H
+    y_bar_t = y_bar_b + BAR_H
+
+    if normalize:
+        vi = 3 if sel_prop == "Volume" else 0
+        hv = [rates[(label_h,b)][vi] for b in range(N_BINS)
+              if rates.get((label_h,b),(None,))[vi] is not None]
+        if hv:
+            s = pd.Series(hv)
+            low_pct = (100 - scale_cap) / 100
+            h_min = float(s.quantile(low_pct)) if sel_prop == "Volume" else 0.0
+            h_max = max(float(s.quantile(scale_cap/100)), h_min + 1e-9)
+        else:
+            h_min, h_max = 0.0, 1.0
+    else:
+        h_min, h_max = global_min, global_max
+
+    shapes.append(dict(type="rect", x0=-0.5, x1=N_BINS-0.5, y0=y_bar_b, y1=y_bar_t,
+                       fillcolor=GREEN_DARK, line=dict(width=0), layer="above"))
+    for x0, x1 in [(-1.1,-0.5),(N_BINS-0.5,N_BINS+0.1)]:
+        shapes.append(dict(type="rect", x0=x0, x1=x1, y0=y_bar_b-5, y1=y_bar_t+5,
+                           fillcolor="#90A4AE", line=dict(color="#607D8B",width=1), layer="above"))
+
+    for b in range(N_BINS):
+        rate, n, k, vol = rates.get((label_h, b), (None, 0, 0, None))
+        metric = vol if sel_prop == "Volume" else rate
+        if metric is not None and h_max > h_min:
+            t = max(0.0, min(1.0, (metric - h_min) / (h_max - h_min)))
+            color = _interp_color(t if sel_prop == "Volume" else t ** cc_gamma)
+        elif metric is not None:
+            color = _interp_color(0.5)
+        else:
+            color = EMPTY_BIN_COLOR
+
+        shapes.append(dict(type="rect", x0=b-0.44, x1=b+0.44, y0=y_base+2, y1=y_bar_b-2,
+                           fillcolor=color,
+                           line=dict(color="rgba(255,255,255,0.55)", width=0.5), layer="above"))
+
+        if sel_prop == "Volume":
+            tip = (f"<b>{label_h}</b>  ·  {bin_labels[b]}<br>Avg volume: {vol:.1f} ml  ({n} eggs)"
+                   if vol is not None else f"<b>{label_h}</b>  ·  {bin_labels[b]}<br>No data")
+        else:
+            vol_line = f"<br>Avg volume: {vol:.1f} ml" if vol is not None else ""
+            _lbl = PROP_LABELS.get(sel_prop, sel_prop)
+            tip = (f"<b>{label_h}</b>  ·  {bin_labels[b]}<br>"
+                   f"{_lbl}: {rate:.2f}%  ({k}/{n} eggs){vol_line}"
+                   if rate is not None else f"<b>{label_h}</b>  ·  {bin_labels[b]}<br>No data")
+        s_x.append(b); s_y.append((y_base+y_bar_b)/2); s_t.append(tip)
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=s_x, y=s_y, mode="markers",
+                         marker=dict(opacity=0, size=20),
+                         hovertemplate="%{text}<extra></extra>",
+                         text=s_t, showlegend=False))
+for idx, (label_h, _) in enumerate(display_groups):
+    inv = N - 1 - idx
+    y_bar_b = inv * LANE_H + PAD + CELL_H
+    y_bar_t = y_bar_b + BAR_H
+    fig.add_annotation(x=(N_BINS-1)/2, y=(y_bar_b+y_bar_t)/2,
+                       text=f"<b>{label_h}</b>",
+                       font=dict(color="white", size=11, family="Trebuchet MS"),
+                       showarrow=False, xanchor="center", yanchor="middle")
+
+fig.update_layout(
+    shapes=shapes, height=max(320, N*LANE_H+60),
+    plot_bgcolor="white", paper_bgcolor=BG_PAGE,
+    margin=dict(l=30, r=20, t=6, b=50),
+    xaxis=dict(range=[-1.2, N_BINS+0.2], tickvals=list(range(N_BINS)), ticktext=bin_labels,
+               tickangle=-40, tickfont=dict(size=9, color=TEXT_MUTED),
+               showgrid=False, zeroline=False,
+               title=dict(text="← select end (count sensor)   ·   belt position   ·   nest end →",
+                          font=dict(size=10, color=TEXT_MUTED))),
+    yaxis=dict(range=[0, N*LANE_H+PAD], showticklabels=False, showgrid=False, zeroline=False),
+    hovermode="closest", font=dict(family="Trebuchet MS"),
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# ── Line statistics tiles ─────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("#### Line statistics")
+st.caption("Contamination rates and average volume per belt line.")
+
+flag_cols_present = [p for p in PROPS if p in agg_clean.columns]
+has_line = "Line" in agg_clean.columns and agg_clean["Line"].notna().any()
+
+for label_h, hd in display_groups:
+    st.markdown(f"**{label_h}**")
+    if has_line:
+        line_groups = sorted(hd["Line"].dropna().unique().astype(int))
+        sub_groups  = [(f"Line {ln}", hd[hd["Line"] == ln]) for ln in line_groups]
+    else:
+        sub_groups = [(label_h, hd)]
+
+    cols = st.columns(max(len(sub_groups), 1))
+    for ci, (line_label, ld) in enumerate(sub_groups):
+        n_total = len(ld)
+        any_rej = (ld[flag_cols_present].any(axis=1).mean() * 100
+                   if flag_cols_present and n_total > 0 else None)
+        vol_val = (ld["Volume"].dropna().mean()
+                   if "Volume" in ld.columns and ld["Volume"].notna().any() else None)
+        html = (f"<div style='font-size:11px;font-weight:600;color:{TEXT_MUTED};"
+                f"text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px'>"
+                f"{line_label}</div>")
+        html += _tile(f"{n_total:,}", "Eggs")
+        html += _tile(f"{any_rej:.1f}%" if any_rej is not None else "—", "Any rejection")
+        for p in flag_cols_present:
+            r = ld[p].mean() * 100 if n_total > 0 else None
+            html += _tile(f"{r:.1f}%" if r is not None else "—", PROP_LABELS.get(p, p))
+        html += _tile(f"{vol_val:.1f}" if vol_val is not None else "—", "Avg vol (ml)")
+        cols[ci].markdown(html, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
