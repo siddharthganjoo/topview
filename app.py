@@ -36,6 +36,14 @@ AAD_CLIENT_ID = st.secrets.get("AAD_CLIENT_ID", os.environ.get("AAD_CLIENT_ID", 
 AAD_TENANT_ID = st.secrets.get("AAD_TENANT_ID", os.environ.get("AAD_TENANT_ID", ""))
 AAD_SCOPES    = ["https://database.windows.net/user_impersonation"]
 
+# Optional hardcoded account list (used when master DB firewall blocks access).
+# Format in Streamlit secrets:
+#   [accounts]
+#   "Hoste"      = 68
+#   "Burnbrae"   = 42
+#   "Broachdale" = 136
+_STATIC_ACCOUNTS: dict = dict(st.secrets.get("accounts", {})) or {}
+
 # ── Visual constants ──────────────────────────────────────────────────────────
 GREEN_DARK  = "#00662f"
 BG_PAGE     = "#F5F5F5"
@@ -433,19 +441,27 @@ with st.sidebar:
         st.markdown("### 🥚 Meggsius Connect")
 
     st.markdown("---")
-    try:
-        accounts_df   = fetch_accounts(_token_key)
-        account_names = accounts_df["Name"].tolist()
+    if _STATIC_ACCOUNTS:
+        # Hardcoded list from secrets — works without master DB access
+        account_names = list(_STATIC_ACCOUNTS.keys())
         default_idx   = (account_names.index(st.session_state.account_name)
                          if st.session_state.account_name in account_names else 0)
         selected_name = st.selectbox("Account", account_names, index=default_idx)
-        name_to_id    = dict(zip(accounts_df["Name"], accounts_df["Id"]))
-        account_id    = int(name_to_id[selected_name])
-    except Exception:
-        # Master DB unreachable (firewall) — fall back to manual ID entry
-        account_id    = int(st.number_input("Account ID", min_value=1,
-                                             value=st.session_state.account_id or 68, step=1))
-        selected_name = str(account_id)
+        account_id    = int(_STATIC_ACCOUNTS[selected_name])
+    else:
+        try:
+            accounts_df   = fetch_accounts(_token_key)
+            account_names = accounts_df["Name"].tolist()
+            default_idx   = (account_names.index(st.session_state.account_name)
+                             if st.session_state.account_name in account_names else 0)
+            selected_name = st.selectbox("Account", account_names, index=default_idx)
+            name_to_id    = dict(zip(accounts_df["Name"], accounts_df["Id"]))
+            account_id    = int(name_to_id[selected_name])
+        except Exception:
+            # Master DB unreachable — manual ID entry
+            account_id    = int(st.number_input("Account ID", min_value=1,
+                                                 value=st.session_state.account_id or 68, step=1))
+            selected_name = str(account_id)
 
     st.markdown("---")
     date_input = st.date_input("Date", value=st.session_state.sel_date)
