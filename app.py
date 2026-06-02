@@ -113,12 +113,19 @@ st.set_page_config(
 
 st.markdown(f"""
 <style>
-html, body, [class*="css"] {{
-    font-family: 'Trebuchet MS', sans-serif;
-    background-color: {BG_PAGE};
-    color: {TEXT_DARK};
+/* ── Force light mode regardless of system/browser preference ── */
+:root, [data-theme="dark"], [data-theme="light"] {{
+    color-scheme: light !important;
+}}
+html, body, [class*="css"], [data-testid="stAppViewContainer"],
+[data-testid="stMain"], .main {{
+    font-family: 'Trebuchet MS', sans-serif !important;
+    background-color: {BG_PAGE} !important;
+    color: {TEXT_DARK} !important;
     font-size: 14px;
 }}
+
+/* ── Sidebar ── */
 [data-testid="stSidebar"] {{
     background-color: {GREEN_DARK} !important;
     min-width: 240px !important;
@@ -142,7 +149,26 @@ html, body, [class*="css"] {{
 [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] * {{
     color: {TEXT_DARK} !important;
 }}
+/* Toggle labels in sidebar */
+[data-testid="stSidebar"] .stToggle label {{ color: white !important; }}
+
+/* Sign out button — white outline so it's visible on green */
+[data-testid="stSidebar"] .stButton > button:not([kind="primary"]) {{
+    background-color: transparent !important;
+    border: 1.5px solid rgba(255,255,255,0.7) !important;
+    color: white !important;
+    border-radius: 6px;
+}}
+[data-testid="stSidebar"] .stButton > button:not([kind="primary"]):hover {{
+    background-color: rgba(255,255,255,0.12) !important;
+    border-color: white !important;
+}}
+
+/* ── Main content ── */
 section.main > div {{ padding-top: 8px !important; }}
+[data-testid="stMain"] {{ background-color: {BG_PAGE} !important; }}
+
+/* ── Metric tiles ── */
 .metric-tile {{
     background: {BG_CARD};
     border-radius: 8px;
@@ -153,6 +179,8 @@ section.main > div {{ padding-top: 8px !important; }}
 .metric-value {{ font-size: 22px; font-weight: 700; color: {GREEN_DARK}; line-height: 1.2; }}
 .metric-label {{ font-size: 10px; color: {TEXT_MUTED}; text-transform: uppercase;
                  letter-spacing: 0.5px; margin-top: 3px; }}
+
+/* ── Hide Streamlit chrome ── */
 #MainMenu {{ visibility: hidden; }}
 footer    {{ visibility: hidden; }}
 header    {{ visibility: hidden; }}
@@ -491,9 +519,12 @@ def fetch_day(account_id: int, day_str: str, _token_key: str):
 # ══════════════════════════════════════════════════════════════════════════════
 _token_key = token[:16] if token else ""   # cache-bust key when token changes
 
+SCALE_CAP = 95    # hardcoded — colour scale percentile cap
+CC_GAMMA  = 2.0   # hardcoded — gradient curve for rejection rate colouring
+
 for k, v in [("sel_date", date.today()), ("account_id", None), ("account_name", None),
              ("sel_prop", PROPS[0]), ("normalize", True), ("combined", False),
-             ("scale_cap", 95), ("cc_gamma", 2.0), ("do_fetch", False)]:
+             ("do_fetch", False)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -506,24 +537,23 @@ with st.sidebar:
         st.markdown("### 🥚 Meggsius Connect")
 
     st.markdown("---")
-    if _STATIC_ACCOUNTS:
-        # Hardcoded list from secrets — works without master DB access
-        account_names = list(_STATIC_ACCOUNTS.keys())
+    # Account selector: try master DB first → static list fallback → manual ID
+    try:
+        accounts_df   = fetch_accounts(_token_key)
+        account_names = accounts_df["Name"].tolist()
         default_idx   = (account_names.index(st.session_state.account_name)
                          if st.session_state.account_name in account_names else 0)
         selected_name = st.selectbox("Account", account_names, index=default_idx)
-        account_id    = int(_STATIC_ACCOUNTS[selected_name])
-    else:
-        try:
-            accounts_df   = fetch_accounts(_token_key)
-            account_names = accounts_df["Name"].tolist()
+        name_to_id    = dict(zip(accounts_df["Name"], accounts_df["Id"]))
+        account_id    = int(name_to_id[selected_name])
+    except Exception:
+        if _STATIC_ACCOUNTS:
+            account_names = list(_STATIC_ACCOUNTS.keys())
             default_idx   = (account_names.index(st.session_state.account_name)
                              if st.session_state.account_name in account_names else 0)
             selected_name = st.selectbox("Account", account_names, index=default_idx)
-            name_to_id    = dict(zip(accounts_df["Name"], accounts_df["Id"]))
-            account_id    = int(name_to_id[selected_name])
-        except Exception:
-            # Master DB unreachable — manual ID entry
+            account_id    = int(_STATIC_ACCOUNTS[selected_name])
+        else:
             account_id    = int(st.number_input("Account ID", min_value=1,
                                                  value=st.session_state.account_id or 68, step=1))
             selected_name = str(account_id)
@@ -534,8 +564,6 @@ with st.sidebar:
                               index=PROPS_EXT.index(st.session_state.sel_prop)
                               if st.session_state.sel_prop in PROPS_EXT else 0,
                               format_func=lambda p: PROP_LABELS_EXT[p])
-    scale_cap  = st.slider("Colour scale cap", 50, 100, st.session_state.scale_cap, 5)
-    cc_gamma   = st.slider("Gradient curve",   1.0, 4.0, st.session_state.cc_gamma, 0.5)
     normalize  = st.toggle("Normalize per house", value=st.session_state.normalize)
     combined   = st.toggle("Houses combined",     value=st.session_state.combined)
 
@@ -547,8 +575,6 @@ with st.sidebar:
         st.session_state.sel_prop     = sel_prop
         st.session_state.normalize    = normalize
         st.session_state.combined     = combined
-        st.session_state.scale_cap    = scale_cap
-        st.session_state.cc_gamma     = cc_gamma
         st.session_state.do_fetch     = True
         st.rerun()
 
@@ -584,8 +610,8 @@ sel_date   = st.session_state.sel_date
 sel_prop   = st.session_state.sel_prop
 normalize  = st.session_state.normalize
 combined   = st.session_state.combined
-scale_cap  = st.session_state.scale_cap
-cc_gamma   = st.session_state.cc_gamma
+scale_cap  = SCALE_CAP
+cc_gamma   = CC_GAMMA
 
 DAYS_LONG = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
 date_str  = f"{DAYS_LONG[sel_date.weekday()]} {sel_date.strftime('%d/%m/%Y')}"
