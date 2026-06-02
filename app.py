@@ -161,30 +161,26 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"],
 }}
 [data-testid="stSidebar"] .stToggle label {{ color: white !important; }}
 
-/* Search button — solid white */
-[data-testid="stSidebar"] .stButton > button[kind="primary"] {{
-    background-color: white !important;
-    color: {GREEN_DARK} !important;
-    font-weight: 700;
-    border: none !important;
-    transition: opacity 0.15s ease, transform 0.15s ease;
+/* All sidebar buttons — white text, white border, transparent bg */
+[data-testid="stSidebar"] .stButton > button {{
+    background-color: rgba(255,255,255,0.15) !important;
+    border: 2px solid rgba(255,255,255,0.85) !important;
+    color: white !important;
+    font-weight: 600;
+    border-radius: 8px;
+    transition: background-color 0.18s ease, transform 0.15s ease;
+    width: 100%;
 }}
-[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {{
-    opacity: 0.92;
+[data-testid="stSidebar"] .stButton > button:hover {{
+    background-color: rgba(255,255,255,0.28) !important;
+    border-color: white !important;
     transform: translateY(-1px);
 }}
-
-/* Sign out button — white outline */
-[data-testid="stSidebar"] .stButton > button:not([kind="primary"]) {{
-    background-color: transparent !important;
-    border: 1.5px solid rgba(255,255,255,0.65) !important;
-    color: white !important;
-    border-radius: 6px;
-    transition: background-color 0.15s ease, border-color 0.15s ease;
-}}
-[data-testid="stSidebar"] .stButton > button:not([kind="primary"]):hover {{
-    background-color: rgba(255,255,255,0.12) !important;
-    border-color: white !important;
+/* Search button slightly more prominent */
+[data-testid="stSidebar"] [data-testid="baseButton-primary"] {{
+    background-color: rgba(255,255,255,0.22) !important;
+    border: 2px solid white !important;
+    font-size: 14px !important;
 }}
 
 /* ── Main content ── */
