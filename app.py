@@ -8,7 +8,7 @@ Streamlit secrets required (app Settings → Secrets):
     AAD_TENANT_ID = "your-directory-id"       # from IT / Azure AD
 """
 
-import os, sys, struct, threading, platform, subprocess
+import os, sys, struct, threading, platform, subprocess, base64, json, time as _time
 from datetime import date, timedelta, datetime
 
 import streamlit as st
@@ -57,6 +57,51 @@ EMPTY_BIN_COLOR = "#4f57a6"
 
 PROPS_EXT = PROPS + ["Volume"]
 PROP_LABELS_EXT = {**PROP_LABELS, "Volume": "Volume (ml)"}
+
+DATA_START = date(2020, 1, 1)   # no Meggsius data before this
+
+
+# ── Token helpers ─────────────────────────────────────────────────────────────
+def _jwt_payload(token_str: str) -> dict:
+    """Decode JWT payload without verifying signature."""
+    try:
+        part = token_str.split(".")[1]
+        part += "=" * (4 - len(part) % 4)
+        return json.loads(base64.urlsafe_b64decode(part))
+    except Exception:
+        return {}
+
+def _token_mins_remaining(token_str: str) -> int:
+    """Minutes until token expires. -1 if unknown."""
+    exp = _jwt_payload(token_str).get("exp")
+    if not exp:
+        return -1
+    return max(0, int((exp - _time.time()) / 60))
+
+def _token_user(token_str: str) -> str:
+    """Best-effort display name from JWT claims."""
+    p = _jwt_payload(token_str)
+    return p.get("name") or p.get("upn") or p.get("unique_name") or "Signed in"
+
+
+# ── Error helper ──────────────────────────────────────────────────────────────
+def _friendly_error(e: Exception) -> str:
+    """Return a user-friendly error string without exposing connection details."""
+    s = str(e)
+    if "40615" in s or "not allowed to access" in s or "firewall" in s.lower():
+        return ("Database firewall blocked the connection. "
+                "IT needs to whitelist this server's outbound IP.")
+    if "timeout" in s.lower() or "Login timeout" in s:
+        return "Connection timed out — Synapse may be under load. Try again in a moment."
+    if "401" in s or "token" in s.lower() or "authentication" in s.lower():
+        return "Authentication failed or expired. Please **Sign out** and sign in again."
+    if "Cannot open server" in s:
+        return "Cannot reach the database server. Check network or contact IT."
+    if "NoneType" in s or "not iterable" in s:
+        return "No data returned. The selected date may have no records."
+    # Strip raw connection string details before showing
+    safe = s.split("(SQLDriverConnect)")[0].split(";")[0][:200]
+    return f"Query error — please try again.\n\n`{safe}`"
 
 # ── Page setup ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -266,6 +311,12 @@ if st.session_state.token is None:
 
 token = st.session_state.token
 
+# Proactive expiry check — force re-auth if token has expired
+if token and _token_mins_remaining(token) == 0:
+    st.session_state.token       = None
+    st.session_state.device_flow = None
+    st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DB helpers
@@ -281,21 +332,35 @@ def _conn(server: str, database: str):
 
 def _fetch(conn, sql: str) -> pd.DataFrame:
     cur = conn.cursor()
-    cur.execute(sql)
-    if cur.description is None:
+    try:
+        cur.execute(sql)
+        if cur.description is None:
+            return pd.DataFrame()
+        cols = [c[0] for c in cur.description]
+        rows: list = []
+        while True:
+            batch = cur.fetchmany(BATCH_SIZE)
+            if not batch:
+                break
+            rows.extend(batch)
+        if not rows:
+            return pd.DataFrame(columns=cols)
+        return pd.DataFrame([tuple(r) for r in rows], columns=cols)
+    finally:
         cur.close()
-        return pd.DataFrame()
-    cols = [c[0] for c in cur.description]
-    rows: list = []
-    while True:
-        batch = cur.fetchmany(BATCH_SIZE)
-        if not batch:
-            break
-        rows.extend(batch)
-    cur.close()
-    if not rows:
-        return pd.DataFrame(columns=cols)
-    return pd.DataFrame([tuple(r) for r in rows], columns=cols)
+
+
+def _fetch_retry(conn_fn, sql: str, retries: int = 2) -> pd.DataFrame:
+    """Call conn_fn() fresh on each retry so a dropped connection is recreated."""
+    last_exc: Exception = RuntimeError("no attempts")
+    for attempt in range(retries):
+        try:
+            return _fetch(conn_fn(), sql)
+        except Exception as e:
+            last_exc = e
+            if attempt < retries - 1:
+                _time.sleep(3)
+    raise last_exc
 
 
 def _nday(d: date) -> date:
@@ -414,10 +479,10 @@ def _xform_select(raw: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=600)
 def fetch_day(account_id: int, day_str: str, _token_key: str):
-    day  = date.fromisoformat(day_str)
-    conn = _conn(SYNAPSE_SERVER, SYNAPSE_DB)
-    dc   = _xform_count(_fetch(conn, _sql_count(account_id, day)))
-    ds   = _xform_select(_fetch(conn, _sql_select(account_id, day)))
+    day     = date.fromisoformat(day_str)
+    conn_fn = lambda: _conn(SYNAPSE_SERVER, SYNAPSE_DB)
+    dc = _xform_count(_fetch_retry(conn_fn, _sql_count(account_id, day)))
+    ds = _xform_select(_fetch_retry(conn_fn, _sql_select(account_id, day)))
     return dc, ds
 
 
@@ -488,6 +553,22 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
+    # User identity + session expiry
+    user_name = _token_user(token)
+    mins      = _token_mins_remaining(token)
+    if mins >= 0:
+        expiry_txt = f"{mins} min remaining" if mins > 5 else f"⚠️ {mins} min — session expiring"
+    else:
+        expiry_txt = "Session active"
+    st.markdown(
+        f'<div style="font-size:11px;color:rgba(255,255,255,0.75);margin-bottom:4px">'
+        f'Signed in as</div>'
+        f'<div style="font-size:12px;font-weight:600;color:white;margin-bottom:2px">'
+        f'{user_name}</div>'
+        f'<div style="font-size:10px;color:rgba(255,255,255,0.6)">{expiry_txt}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Sign out", use_container_width=True):
         st.session_state.token       = None
         st.session_state.device_flow = None
@@ -524,16 +605,29 @@ if not st.session_state.do_fetch or account_id is None:
     st.info("Select an account and date in the sidebar, then click **Search**.")
     st.stop()
 
+# ── Date validation ────────────────────────────────────────────────────────────
+if sel_date > date.today():
+    st.warning("Cannot query future dates — select today or earlier.")
+    st.stop()
+if sel_date < DATA_START:
+    st.warning(f"No Meggsius data available before {DATA_START.strftime('%d/%m/%Y')}.")
+    st.stop()
+
+# ── Token expiry warning ───────────────────────────────────────────────────────
+_mins = _token_mins_remaining(token)
+if 0 < _mins <= 5:
+    st.warning(f"Your session expires in {_mins} minute(s). Save your work and sign out/in soon.")
+
 # ── Fetch ─────────────────────────────────────────────────────────────────────
 with st.status(f"Querying Synapse for {sel_date}…", expanded=True) as fetch_status:
     try:
         st.write("Fetching count data…")
         st.write("Fetching select / grading data…")
         dc, ds = fetch_day(account_id, str(sel_date), _token_key)
-        fetch_status.update(label=f"Loaded ✓", state="complete", expanded=False)
+        fetch_status.update(label="Loaded ✓", state="complete", expanded=False)
     except Exception as e:
         fetch_status.update(label="Query failed", state="error")
-        st.error(f"Query failed: {e}")
+        st.error(_friendly_error(e))
         st.stop()
 
 if dc is None or dc.empty:
