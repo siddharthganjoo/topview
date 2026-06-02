@@ -113,10 +113,8 @@ st.set_page_config(
 
 st.markdown(f"""
 <style>
-/* ── Force light mode regardless of system/browser preference ── */
-:root, [data-theme="dark"], [data-theme="light"] {{
-    color-scheme: light !important;
-}}
+/* ── Force light mode ── */
+:root, [data-theme="dark"], [data-theme="light"] {{ color-scheme: light !important; }}
 html, body, [class*="css"], [data-testid="stAppViewContainer"],
 [data-testid="stMain"], .main {{
     font-family: 'Trebuchet MS', sans-serif !important;
@@ -124,6 +122,17 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"],
     color: {TEXT_DARK} !important;
     font-size: 14px;
 }}
+
+/* ── Animations ── */
+@keyframes fadeUp {{
+    from {{ opacity: 0; transform: translateY(10px); }}
+    to   {{ opacity: 1; transform: translateY(0); }}
+}}
+@keyframes fadeIn {{
+    from {{ opacity: 0; }}
+    to   {{ opacity: 1; }}
+}}
+.main .block-container {{ animation: fadeIn 0.35s ease; }}
 
 /* ── Sidebar ── */
 [data-testid="stSidebar"] {{
@@ -135,6 +144,7 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"],
     background-color: white;
     border-radius: 8px;
     padding: 8px;
+    margin-bottom: 4px;
 }}
 [data-testid="stSidebar"] * {{ color: white !important; }}
 [data-testid="stSidebar"] input,
@@ -149,15 +159,28 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"],
 [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] * {{
     color: {TEXT_DARK} !important;
 }}
-/* Toggle labels in sidebar */
 [data-testid="stSidebar"] .stToggle label {{ color: white !important; }}
 
-/* Sign out button — white outline so it's visible on green */
+/* Search button — solid white */
+[data-testid="stSidebar"] .stButton > button[kind="primary"] {{
+    background-color: white !important;
+    color: {GREEN_DARK} !important;
+    font-weight: 700;
+    border: none !important;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}}
+[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {{
+    opacity: 0.92;
+    transform: translateY(-1px);
+}}
+
+/* Sign out button — white outline */
 [data-testid="stSidebar"] .stButton > button:not([kind="primary"]) {{
     background-color: transparent !important;
-    border: 1.5px solid rgba(255,255,255,0.7) !important;
+    border: 1.5px solid rgba(255,255,255,0.65) !important;
     color: white !important;
     border-radius: 6px;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
 }}
 [data-testid="stSidebar"] .stButton > button:not([kind="primary"]):hover {{
     background-color: rgba(255,255,255,0.12) !important;
@@ -168,17 +191,56 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"],
 section.main > div {{ padding-top: 8px !important; }}
 [data-testid="stMain"] {{ background-color: {BG_PAGE} !important; }}
 
-/* ── Metric tiles ── */
+/* ── Metric tiles with hover animation ── */
 .metric-tile {{
     background: {BG_CARD};
-    border-radius: 8px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.10);
-    padding: 10px 14px;
+    border-radius: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.09);
+    padding: 12px 14px;
     text-align: center;
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
+    animation: fadeUp 0.3s ease both;
+}}
+.metric-tile:hover {{
+    transform: translateY(-3px);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.12);
 }}
 .metric-value {{ font-size: 22px; font-weight: 700; color: {GREEN_DARK}; line-height: 1.2; }}
 .metric-label {{ font-size: 10px; color: {TEXT_MUTED}; text-transform: uppercase;
-                 letter-spacing: 0.5px; margin-top: 3px; }}
+                 letter-spacing: 0.5px; margin-top: 4px; }}
+
+/* ── Login card ── */
+.login-card {{
+    background: {BG_CARD};
+    border-radius: 14px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+    padding: 36px 32px;
+    animation: fadeUp 0.4s ease;
+}}
+.login-code {{
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: 6px;
+    color: {GREEN_DARK};
+    background: #f0f7f2;
+    border-radius: 8px;
+    padding: 12px 20px;
+    text-align: center;
+    margin: 16px 0;
+    font-family: monospace;
+}}
+
+/* ── Section headings ── */
+.section-heading {{
+    font-size: 13px;
+    font-weight: 600;
+    color: {TEXT_MUTED};
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin: 20px 0 10px 0;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #E8E8E8;
+}}
 
 /* ── Hide Streamlit chrome ── */
 #MainMenu {{ visibility: hidden; }}
@@ -298,12 +360,21 @@ if st.session_state.token is None:
         pass
 
 if st.session_state.token is None:
-    col_l, col_c, col_r = st.columns([1, 2, 1])
+    _, col_c, _ = st.columns([1, 2, 1])
     with col_c:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="login-card">', unsafe_allow_html=True)
+
         if os.path.exists(LOGO_PATH):
             st.image(LOGO_PATH, use_container_width=True)
-        st.markdown("## Sign in")
-        st.markdown("Use your **company Microsoft account** to access the dashboard.")
+
+        st.markdown(
+            f'<div style="text-align:center;margin:16px 0 4px 0">'
+            f'<span style="font-size:22px;font-weight:700;color:{GREEN_DARK}">Top View</span><br>'
+            f'<span style="font-size:13px;color:{TEXT_MUTED}">Sign in with your company account</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
         app_msal = _msal_app()
         if st.session_state.device_flow is None:
@@ -314,12 +385,20 @@ if st.session_state.token is None:
             st.session_state.device_flow = flow
 
         flow = st.session_state.device_flow
-        st.info(
-            f"**Step 1** — Open: [{flow['verification_uri']}]({flow['verification_uri']})\n\n"
-            f"**Step 2** — Enter code: `{flow['user_code']}`\n\n"
-            f"**Step 3** — Sign in with your company account\n\n"
-            f"**Step 4** — Click **Done** below"
+
+        st.markdown(
+            f'<div style="margin-top:20px">'
+            f'<div style="font-size:12px;color:{TEXT_MUTED};margin-bottom:4px">1. Go to</div>'
+            f'<a href="{flow["verification_uri"]}" target="_blank" style="font-size:14px;'
+            f'font-weight:600;color:{GREEN_DARK}">{flow["verification_uri"]}</a>'
+            f'<div style="font-size:12px;color:{TEXT_MUTED};margin:12px 0 4px 0">2. Enter this code</div>'
+            f'<div class="login-code">{flow["user_code"]}</div>'
+            f'<div style="font-size:12px;color:{TEXT_MUTED};margin-bottom:16px">'
+            f'3. Sign in with your Microsoft company account</div>'
+            f'</div>',
+            unsafe_allow_html=True,
         )
+
         if st.button("✓  Done — I've signed in", type="primary", use_container_width=True):
             result_holder: dict = {}
             def _acquire():
@@ -335,7 +414,9 @@ if st.session_state.token is None:
             else:
                 st.error(f"Login failed: {result_holder['r'].get('error_description','Unknown')}")
                 st.session_state.device_flow = None
-        st.stop()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()
 
 token = st.session_state.token
 
@@ -628,7 +709,22 @@ st.markdown(
 )
 
 if not st.session_state.do_fetch or account_id is None:
-    st.info("Select an account and date in the sidebar, then click **Search**.")
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        st.markdown(
+            f'<div style="text-align:center;padding:40px 20px;background:{BG_CARD};'
+            f'border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,0.07);'
+            f'animation:fadeUp 0.4s ease">'
+            f'<div style="font-size:40px;margin-bottom:12px">🥚</div>'
+            f'<div style="font-size:18px;font-weight:700;color:{GREEN_DARK};margin-bottom:8px">'
+            f'Top View</div>'
+            f'<div style="font-size:13px;color:{TEXT_MUTED};line-height:1.6">'
+            f'Select an <strong>account</strong> and <strong>date</strong><br>'
+            f'in the sidebar, then click <strong>Search</strong>.</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
     st.stop()
 
 # ── Date validation ────────────────────────────────────────────────────────────
@@ -842,9 +938,11 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # ── Line statistics tiles ─────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown("#### Line statistics")
-st.caption("Contamination rates and average volume per belt line.")
+st.markdown(
+    '<div class="section-heading">Line statistics &nbsp;·&nbsp; '
+    'contamination rates and average volume per belt line</div>',
+    unsafe_allow_html=True,
+)
 
 flag_cols_present = [p for p in PROPS if p in agg_clean.columns]
 has_line = "Line" in agg_clean.columns and agg_clean["Line"].notna().any()
